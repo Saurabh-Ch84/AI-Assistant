@@ -1,8 +1,11 @@
 # standard library imports
 import os 
+from types import SimpleNamespace
+
 # third party library imports
 from openai import OpenAI
 from dotenv import load_dotenv
+
 # local modules
 from tools import TOOLS, run_tool
 from Utils.utils import log
@@ -39,9 +42,77 @@ messages.append(
     # adding system instructions.
     {
         "role":"system",
-        "content":"Use you knowledge for questions related to programming and science. Use tools call only when necessary and answer within 100 words only."
+        "content":"Use your knowledge for questions related to programming and science. Use tools call only when necessary and answer within 100 words only."
     }
 )
+
+def stream_chat(history):
+    stream=client.chat.completions.create(
+        model=os.getenv("MODEL"), # type: ignore
+        messages=history,
+        tools=TOOLS, # type: ignore
+        stream=True
+    )
+
+    full_response=''
+    calls={}
+    label_printed=False
+
+    try:
+        # Streaming started
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta=chunk.choices[0].delta
+            # Content Streaming.
+            if delta.content:
+                if not label_printed:
+                    print("Assistant: ",end="",flush=True)
+                    label_printed=True
+                print(delta.content, end="", flush=True)
+                full_response+=delta.content
+                # Tool Calls
+                for tc in (delta.tool_calls or []):
+                    obj=calls.setdefault(
+                        tc.index,
+                        SimpleNamespace(id=None, function=SimpleNamespace(
+                            name="",arguments=""
+                        )), 
+                    )
+                    if tc.id:
+                        obj.id=tc.id
+                    if tc.function and tc.function.name:
+                        obj.function.name+=tc.function.name
+                    if tc.function and tc.function.arguments:
+                        obj.function.arguments+=tc.function.arguments
+    except KeyboardInterrupt :
+        print("\n Stopped by User.")
+        calls={}
+        
+    if label_printed:
+        print() # move to the next line after the assistant's response.  
+    calls_list=[]
+    for key in sorted(calls):
+        calls_list.append(calls[key])
+    return full_response, calls_list
+
+
+def build_tool_calls_payload(tool_calls):
+    """converts our collected tool calls into the dictionary format that the API expects inside an assistant message"""
+    payload=[]
+    for tool_call in tool_calls:
+        tool_call_dict={
+            "id":tool_call.id,
+            "type": "function",
+            "function":{
+                "name":tool_call.function.name,
+                "arguments":tool_call.function.arguments,
+            },
+        }
+        payload.append(tool_call_dict)
+
+    return payload
+
 
 while True:
     user_input=input("\nUser: ")
@@ -57,21 +128,24 @@ while True:
     # Chained Tool Calling.
     for iteration in range(MAX_LIMIT):
         # openai client api
-        response=client.chat.completions.create(
-            model=os.getenv("MODEL"),
-            messages=messages,
-            tools=TOOLS, # passing the tools to the model so that it can call them if needed.
-        )
+        full_response, tool_calls=stream_chat(messages) 
 
-        msg=response.choices[0].message
+        if not tool_calls:
+            messages.append({
+                "role":"assistant",
+                "content":full_response
+            })
+            break 
 
-        if not msg.tool_calls:
-            break
+        log(f"Iteration {iteration+1}: model requested {len(tool_calls)} tool call(s)")
 
-        log(f"Iteration {iteration+1}: model requested {len(msg.tool_calls)} tool call(s)")
+        messages.append({
+            "role":"assistant",
+            "content":full_response if full_response else None,
+            "tool_calls":build_tool_calls_payload(tool_calls)
+        })
 
-        messages.append(msg)
-        for tool_call in msg.tool_calls:
+        for tool_call in tool_calls:
             result=run_tool(tool_call)
 
             messages.append({
@@ -89,10 +163,3 @@ while True:
         })
         print("Max iterations reached, stopping tool calls.")
         continue
-
-    messages.append({
-        "role": "assistant",
-        "content": msg.content
-    })
-
-    print("Jarvis: "+(msg.content or ""))
