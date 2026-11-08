@@ -3,6 +3,5 @@
 Lib/
 Scripts/
 __pycache__/
-Test/
 .gitignore
 __init__.py
